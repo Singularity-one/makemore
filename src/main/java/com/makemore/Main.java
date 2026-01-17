@@ -1,97 +1,116 @@
 package com.makemore;
 
-import com.makemore.bigram.BigramLanguageModel;
+import com.makemore.mlp.MLPLanguageModel;
 import java.util.List;
 
 /**
- * Main class demonstrating makemore bigram language modeling
+ * Main class for MLP Language Model
  *
- * This implements Andrej Karpathy's makemore Lecture 2:
- * "The spelled-out intro to language modeling: building makemore"
- *
- * Two approaches are demonstrated:
- * 1. Counting-based: Simple bigram frequency counting
- * 2. Neural Network: Gradient descent with single-layer network
+ * Implements Andrej Karpathy's makemore Lecture 3:
+ * "Building makemore Part 2: MLP"
  */
 public class Main {
 
     public static void main(String[] args) {
         try {
-            System.out.println("╔══════════════════════════════════════════════════════════╗");
-            System.out.println("║     Makemore: Bigram Character-Level Language Model     ║");
-            System.out.println("║          Based on Andrej Karpathy's Lecture 2           ║");
-            System.out.println("╚══════════════════════════════════════════════════════════╝\n");
+            System.out.println("╔════════════════════════════════════════════════════════════╗");
+            System.out.println("║   Makemore Part 2: Multi-Layer Perceptron (MLP)          ║");
+            System.out.println("║          Character-Level Language Model                   ║");
+            System.out.println("║              Based on Karpathy's Lecture 3                ║");
+            System.out.println("╚════════════════════════════════════════════════════════════╝\n");
 
-            // Initialize model
-            BigramLanguageModel model = new BigramLanguageModel();
+            // Hyperparameters
+            int blockSize = 3;        // Context length (how many chars to predict next one)
+            int embeddingDim = 10;    // Embedding dimension
+            int hiddenSize = 200;     // Hidden layer size
+
+            // Training hyperparameters
+            int numIterations = 200000;
+            double learningRate = 0.1;
+            int batchSize = 32;
+
+            System.out.println("=== Model Configuration ===");
+            System.out.println("Block size (context): " + blockSize);
+            System.out.println("Embedding dimension: " + embeddingDim);
+            System.out.println("Hidden layer size: " + hiddenSize);
+
+            // Create model
+            MLPLanguageModel model = new MLPLanguageModel(blockSize, embeddingDim, hiddenSize);
 
             // Load data
             String dataPath = "names.txt";
-            System.out.println("Loading data from: " + dataPath);
+            System.out.println("\n=== Loading Data ===");
             model.loadData(dataPath);
 
-            // 2. 建立 bigramCounts
-            model.trainCounting();
+            // Build dataset
+            model.buildDataset();
 
-            // Print some statistics
-            model.printTopBigrams(30);
+            // Initialize parameters
+            model.initializeParameters();
 
-            // ===== APPROACH 1: COUNTING METHOD =====
-            System.out.println("\n" + "=".repeat(60));
-            System.out.println("APPROACH 1: COUNTING-BASED BIGRAM MODEL");
-            System.out.println("=".repeat(60));
+            // Train
+            model.train(numIterations, learningRate, batchSize);
 
-            model.trainCounting();
-
-            System.out.println("\nSampling 10 names using counting method:");
-            List<String> countingSamples = model.sampleCounting(10);
-            for (int i = 0; i < countingSamples.size(); i++) {
-                System.out.printf("%2d. %s\n", i + 1, countingSamples.get(i));
+            // Sample names
+            System.out.println("\n=== Sampling 20 Names ===");
+            List<String> samples = model.sample(20);
+            for (int i = 0; i < samples.size(); i++) {
+                System.out.printf("%2d. %s\n", i + 1, samples.get(i));
             }
 
-            // ===== APPROACH 2: NEURAL NETWORK METHOD =====
+            // Summary
             System.out.println("\n" + "=".repeat(60));
-            System.out.println("APPROACH 2: NEURAL NETWORK BIGRAM MODEL");
+            System.out.println("KEY INSIGHTS FROM LECTURE 3");
             System.out.println("=".repeat(60));
 
-            // Hyperparameters
-            int numIterations = 100;
-            double learningRate = 50.0;
-            double regularization = 0.01;
+            System.out.println("\n🔑 Core Concepts Learned:");
+            System.out.println("   1. Embeddings: Characters → Dense Vectors");
+            System.out.println("      - Transforms discrete chars into continuous space");
+            System.out.println("      - Learns semantic relationships");
 
-            System.out.printf("\nHyperparameters:\n");
-            System.out.printf("  - Iterations: %d\n", numIterations);
-            System.out.printf("  - Learning Rate: %.1f\n", learningRate);
-            System.out.printf("  - L2 Regularization: %.4f\n", regularization);
+            System.out.println("\n   2. Context Window:");
+            System.out.println("      - Uses previous " + blockSize + " characters");
+            System.out.println("      - Sliding window over text");
 
-            model.trainNeuralNet(numIterations, learningRate, regularization);
+            System.out.println("\n   3. Hidden Layer:");
+            System.out.println("      - Non-linear transformation (tanh)");
+            System.out.println("      - Learns complex patterns");
 
-            System.out.println("\nSampling 10 names using neural network:");
-            List<String> nnSamples = model.sampleNeuralNet(10);
-            for (int i = 0; i < nnSamples.size(); i++) {
-                System.out.printf("%2d. %s\n", i + 1, nnSamples.get(i));
-            }
+            System.out.println("\n   4. Train/Dev/Test Split:");
+            System.out.println("      - Training: 80% - Learn parameters");
+            System.out.println("      - Dev: 10% - Tune hyperparameters");
+            System.out.println("      - Test: 10% - Final evaluation");
 
-            // ===== COMPARISON =====
-            System.out.println("\n" + "=".repeat(60));
-            System.out.println("COMPARISON & INSIGHTS");
-            System.out.println("=".repeat(60));
+            System.out.println("\n   5. Mini-Batch Training:");
+            System.out.println("      - Batch size: " + batchSize);
+            System.out.println("      - Faster training, better generalization");
 
-            System.out.println("\n🔍 Key Observations:");
-            System.out.println("   1. Both methods learn character-level patterns");
-            System.out.println("   2. Counting is exact but needs smoothing for unseen bigrams");
-            System.out.println("   3. Neural network learns distributed representations");
-            System.out.println("   4. Neural network supports gradient-based optimization");
-            System.out.println("   5. Neural network generalizes better with regularization");
+            System.out.println("\n📊 Architecture Diagram:");
+            System.out.println("   Input (context of " + blockSize + " chars)");
+            System.out.println("        ↓");
+            System.out.println("   Embedding Layer (" + embeddingDim + "D vectors)");
+            System.out.println("        ↓");
+            System.out.println("   Flatten (" + (blockSize * embeddingDim) + " dims)");
+            System.out.println("        ↓");
+            System.out.println("   Hidden Layer (" + hiddenSize + " neurons + tanh)");
+            System.out.println("        ↓");
+            System.out.println("   Output Layer (" + model.getVocabSize() + " logits)");
+            System.out.println("        ↓");
+            System.out.println("   Softmax → Probability Distribution");
 
-            System.out.println("\n💡 What's Next:");
-            System.out.println("   • Lecture 3: MLP with hidden layers and embeddings");
-            System.out.println("   • Lecture 4: Batch normalization and activation analysis");
-            System.out.println("   • Lecture 5: Manual backpropagation (Backprop Ninja)");
-            System.out.println("   • Lecture 6: WaveNet with hierarchical structure");
-            System.out.println("   • Lecture 7: Building GPT from scratch");
+            System.out.println("\n💡 Improvements over Lecture 2 (Bigrams):");
+            System.out.println("   ✓ Larger context (3 chars vs 1 char)");
+            System.out.println("   ✓ Learned embeddings (vs one-hot)");
+            System.out.println("   ✓ Hidden layer (non-linear combinations)");
+            System.out.println("   ✓ Much better quality names!");
 
-            System.out.println("\n✅ Lecture 2 Complete!\n");
+            System.out.println("\n🎯 What's Next:");
+            System.out.println("   • Lecture 4: BatchNorm & Gradient Analysis");
+            System.out.println("   • Lecture 5: Manual Backpropagation");
+            System.out.println("   • Lecture 6: WaveNet Architecture");
+            System.out.println("   • Lecture 7: Transformer/GPT");
+
+            System.out.println("\n✅ Lecture 3 Complete!\n");
 
         } catch (Exception e) {
             System.err.println("Error: " + e.getMessage());
