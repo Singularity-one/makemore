@@ -425,66 +425,131 @@ public class Tensor {
     }
 
     // Division (element-wise or with broadcasting)
+    /**
+     * Division with broadcasting
+     * Supports:
+     * - (batch, features) / (batch, 1)  [原本支持]
+     * - (batch, features) / (features,)  [新增! BatchNorm需要]
+     * - Element-wise division
+     */
     public Tensor div(Tensor other) {
         double[] result = new double[size];
 
-        if (shape.length == 2 && other.shape.length == 2 &&
-                shape[0] == other.shape[0] && other.shape[1] == 1) {
-            // Broadcasting: (m, n) / (m, 1)
-            for (int i = 0; i < shape[0]; i++) {
-                for (int j = 0; j < shape[1]; j++) {
-                    result[i * shape[1] + j] = data[i * shape[1] + j] / other.data[i];
+        // Case 1: (batch, features) / (features,) - BatchNorm case!
+        if (shape.length == 2 && other.shape.length == 1 && shape[1] == other.shape[0]) {
+            int batchSize = shape[0];
+            int features = shape[1];
+
+            for (int i = 0; i < batchSize; i++) {
+                for (int j = 0; j < features; j++) {
+                    result[i * features + j] = data[i * features + j] / other.data[j];
                 }
             }
-        } else if (Arrays.equals(shape, other.shape)) {
-            // Element-wise division
+
+            Tensor out = new Tensor(result, shape, requiresGrad || other.requiresGrad);
+            out.prev.add(this);
+            out.prev.add(other);
+            out.op = "/";
+
+            if (out.requiresGrad) {
+                out.backward = (v) -> {
+                    if (this.requiresGrad) {
+                        for (int i = 0; i < batchSize; i++) {
+                            for (int j = 0; j < features; j++) {
+                                this.grad[i * features + j] += out.grad[i * features + j] / other.data[j];
+                            }
+                        }
+                    }
+                    if (other.requiresGrad) {
+                        // ∂L/∂other[j] = sum_i ∂L/∂out[i,j] * (-x[i,j] / other[j]²)
+                        for (int i = 0; i < batchSize; i++) {
+                            for (int j = 0; j < features; j++) {
+                                other.grad[j] += -out.grad[i * features + j] *
+                                        this.data[i * features + j] / (other.data[j] * other.data[j]);
+                            }
+                        }
+                    }
+                    return null;
+                };
+            }
+
+            return out;
+        }
+
+        // Case 2: (batch, features) / (batch, 1) - 原本的廣播
+        if (shape.length == 2 && other.shape.length == 2 &&
+                shape[0] == other.shape[0] && other.shape[1] == 1) {
+
+            int batchSize = shape[0];
+            int features = shape[1];
+
+            for (int i = 0; i < batchSize; i++) {
+                for (int j = 0; j < features; j++) {
+                    result[i * features + j] = data[i * features + j] / other.data[i];
+                }
+            }
+
+            Tensor out = new Tensor(result, shape, requiresGrad || other.requiresGrad);
+            out.prev.add(this);
+            out.prev.add(other);
+            out.op = "/";
+
+            if (out.requiresGrad) {
+                out.backward = (v) -> {
+                    if (this.requiresGrad) {
+                        for (int i = 0; i < batchSize; i++) {
+                            for (int j = 0; j < features; j++) {
+                                this.grad[i * features + j] += out.grad[i * features + j] / other.data[i];
+                            }
+                        }
+                    }
+                    if (other.requiresGrad) {
+                        for (int i = 0; i < batchSize; i++) {
+                            for (int j = 0; j < features; j++) {
+                                other.grad[i] += -out.grad[i * features + j] *
+                                        data[i * features + j] / (other.data[i] * other.data[i]);
+                            }
+                        }
+                    }
+                    return null;
+                };
+            }
+
+            return out;
+        }
+
+        // Case 3: Element-wise division (same shapes)
+        if (Arrays.equals(shape, other.shape)) {
             for (int i = 0; i < size; i++) {
                 result[i] = data[i] / other.data[i];
             }
-        } else {
-            throw new IllegalArgumentException("Incompatible shapes for division");
-        }
 
-        Tensor out = new Tensor(result, shape, requiresGrad || other.requiresGrad);
-        out.prev.add(this);
-        out.prev.add(other);
-        out.op = "/";
+            Tensor out = new Tensor(result, shape, requiresGrad || other.requiresGrad);
+            out.prev.add(this);
+            out.prev.add(other);
+            out.op = "/";
 
-        if (out.requiresGrad) {
-            out.backward = (v) -> {
-                if (this.requiresGrad) {
-                    if (other.shape.length == 2 && other.shape[1] == 1 && shape.length == 2) {
-                        for (int i = 0; i < shape[0]; i++) {
-                            for (int j = 0; j < shape[1]; j++) {
-                                this.grad[i * shape[1] + j] += out.grad[i * shape[1] + j] / other.data[i];
-                            }
-                        }
-                    } else {
+            if (out.requiresGrad) {
+                out.backward = (v) -> {
+                    if (this.requiresGrad) {
                         for (int i = 0; i < size; i++) {
                             this.grad[i] += out.grad[i] / other.data[i];
                         }
                     }
-                }
-
-                if (other.requiresGrad) {
-                    if (other.shape.length == 2 && other.shape[1] == 1 && shape.length == 2) {
-                        for (int i = 0; i < shape[0]; i++) {
-                            for (int j = 0; j < shape[1]; j++) {
-                                other.grad[i] += -out.grad[i * shape[1] + j] *
-                                        data[i * shape[1] + j] / (other.data[i] * other.data[i]);
-                            }
-                        }
-                    } else {
+                    if (other.requiresGrad) {
                         for (int i = 0; i < size; i++) {
                             other.grad[i] += -out.grad[i] * data[i] / (other.data[i] * other.data[i]);
                         }
                     }
-                }
-                return null;
-            };
+                    return null;
+                };
+            }
+
+            return out;
         }
 
-        return out;
+        throw new IllegalArgumentException("Incompatible shapes for division: " +
+                Arrays.toString(shape) + " / " + Arrays.toString(other.shape));
     }
 
     // Negation
@@ -638,6 +703,252 @@ public class Tensor {
                         int classIdx = (int) indicesData[i];
                         this.grad[i * fNumClasses + classIdx] += out.grad[i];
                     }
+                }
+                return null;
+            };
+        }
+
+        return out;
+    }
+
+    /**
+     * Mean along dimension 0 (over batch)
+     * Input: (batch, features)
+     * Output: (features,)
+     */
+    public Tensor mean(int dim) {
+        if (dim != 0 || shape.length != 2) {
+            throw new IllegalArgumentException("Only supports mean over dim=0 for 2D tensors");
+        }
+
+        int batchSize = shape[0];
+        int features = shape[1];
+
+        double[] result = new double[features];
+        for (int j = 0; j < features; j++) {
+            double sum = 0.0;
+            for (int i = 0; i < batchSize; i++) {
+                sum += data[i * features + j];
+            }
+            result[j] = sum / batchSize;
+        }
+
+        Tensor out = new Tensor(result, new int[]{features}, requiresGrad);
+        out.prev.add(this);
+        out.op = "mean0";
+
+        if (out.requiresGrad) {
+            final int fBatch = batchSize;
+            final int fFeat = features;
+            out.backward = (v) -> {
+                for (int i = 0; i < fBatch; i++) {
+                    for (int j = 0; j < fFeat; j++) {
+                        this.grad[i * fFeat + j] += out.grad[j] / fBatch;
+                    }
+                }
+                return null;
+            };
+        }
+
+        return out;
+    }
+
+    /**
+     * Variance along dimension 0 (over batch)
+     * Input: (batch, features)
+     * Output: (features,)
+     */
+    public Tensor variance(int dim) {
+        if (dim != 0 || shape.length != 2) {
+            throw new IllegalArgumentException("Only supports variance over dim=0 for 2D tensors");
+        }
+
+        int batchSize = shape[0];
+        int features = shape[1];
+
+        // First calculate mean
+        double[] means = new double[features];
+        for (int j = 0; j < features; j++) {
+            double sum = 0.0;
+            for (int i = 0; i < batchSize; i++) {
+                sum += data[i * features + j];
+            }
+            means[j] = sum / batchSize;
+        }
+
+        // Then calculate variance
+        double[] result = new double[features];
+        for (int j = 0; j < features; j++) {
+            double sumSq = 0.0;
+            for (int i = 0; i < batchSize; i++) {
+                double diff = data[i * features + j] - means[j];
+                sumSq += diff * diff;
+            }
+            result[j] = sumSq / batchSize;
+        }
+
+        Tensor out = new Tensor(result, new int[]{features}, requiresGrad);
+        out.prev.add(this);
+        out.op = "var0";
+
+        if (out.requiresGrad) {
+            final int fBatch = batchSize;
+            final int fFeat = features;
+            final double[] fMeans = means;
+            out.backward = (v) -> {
+                // ∂var/∂x = 2(x - mean) / N
+                for (int i = 0; i < fBatch; i++) {
+                    for (int j = 0; j < fFeat; j++) {
+                        double diff = this.data[i * fFeat + j] - fMeans[j];
+                        this.grad[i * fFeat + j] += 2.0 * diff / fBatch * out.grad[j];
+                    }
+                }
+                return null;
+            };
+        }
+
+        return out;
+    }
+
+    /**
+     * Subtract with broadcasting
+     * (batch, features) - (features,) → (batch, features)
+     */
+    public Tensor subtract(Tensor other) {
+        if (shape.length == 2 && other.shape.length == 1 && shape[1] == other.shape[0]) {
+            // Broadcasting: (batch, features) - (features,)
+            int batchSize = shape[0];
+            int features = shape[1];
+
+            double[] result = new double[size];
+            for (int i = 0; i < batchSize; i++) {
+                for (int j = 0; j < features; j++) {
+                    result[i * features + j] = data[i * features + j] - other.data[j];
+                }
+            }
+
+            Tensor out = new Tensor(result, shape, requiresGrad || other.requiresGrad);
+            out.prev.add(this);
+            out.prev.add(other);
+            out.op = "-";
+
+            if (out.requiresGrad) {
+                out.backward = (v) -> {
+                    if (this.requiresGrad) {
+                        for (int i = 0; i < size; i++) {
+                            this.grad[i] += out.grad[i];
+                        }
+                    }
+                    if (other.requiresGrad) {
+                        // Sum over batch dimension
+                        for (int i = 0; i < batchSize; i++) {
+                            for (int j = 0; j < features; j++) {
+                                other.grad[j] -= out.grad[i * features + j];
+                            }
+                        }
+                    }
+                    return null;
+                };
+            }
+
+            return out;
+        }
+
+        throw new IllegalArgumentException("Unsupported shapes for subtract");
+    }
+
+    /**
+     * Square root element-wise
+     */
+    public Tensor sqrt() {
+        double[] result = new double[size];
+        for (int i = 0; i < size; i++) {
+            result[i] = Math.sqrt(data[i]);
+        }
+
+        Tensor out = new Tensor(result, shape, requiresGrad);
+        out.prev.add(this);
+        out.op = "sqrt";
+
+        if (out.requiresGrad) {
+            out.backward = (v) -> {
+                // ∂sqrt(x)/∂x = 1 / (2*sqrt(x))
+                for (int i = 0; i < size; i++) {
+                    this.grad[i] += out.grad[i] / (2.0 * out.data[i]);
+                }
+                return null;
+            };
+        }
+
+        return out;
+    }
+
+    /**
+     * Multiply with broadcasting
+     * (batch, features) * (features,) → (batch, features)
+     */
+    public Tensor mul(Tensor other) {
+        if (shape.length == 2 && other.shape.length == 1 && shape[1] == other.shape[0]) {
+            // Broadcasting: (batch, features) * (features,)
+            int batchSize = shape[0];
+            int features = shape[1];
+
+            double[] result = new double[size];
+            for (int i = 0; i < batchSize; i++) {
+                for (int j = 0; j < features; j++) {
+                    result[i * features + j] = data[i * features + j] * other.data[j];
+                }
+            }
+
+            Tensor out = new Tensor(result, shape, requiresGrad || other.requiresGrad);
+            out.prev.add(this);
+            out.prev.add(other);
+            out.op = "*";
+
+            if (out.requiresGrad) {
+                out.backward = (v) -> {
+                    if (this.requiresGrad) {
+                        for (int i = 0; i < batchSize; i++) {
+                            for (int j = 0; j < features; j++) {
+                                this.grad[i * features + j] += out.grad[i * features + j] * other.data[j];
+                            }
+                        }
+                    }
+                    if (other.requiresGrad) {
+                        // Sum over batch dimension
+                        for (int i = 0; i < batchSize; i++) {
+                            for (int j = 0; j < features; j++) {
+                                other.grad[j] += this.data[i * features + j] * out.grad[i * features + j];
+                            }
+                        }
+                    }
+                    return null;
+                };
+            }
+
+            return out;
+        }
+
+        throw new IllegalArgumentException("Unsupported shapes for mul");
+    }
+
+    /**
+     * Add scalar (for eps in BatchNorm)
+     */
+    public Tensor add(double scalar) {
+        double[] result = new double[size];
+        for (int i = 0; i < size; i++) {
+            result[i] = data[i] + scalar;
+        }
+
+        Tensor out = new Tensor(result, shape, requiresGrad);
+        out.prev.add(this);
+        out.op = "+scalar";
+
+        if (out.requiresGrad) {
+            out.backward = (v) -> {
+                for (int i = 0; i < size; i++) {
+                    this.grad[i] += out.grad[i];
                 }
                 return null;
             };

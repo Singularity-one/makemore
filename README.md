@@ -822,3 +822,695 @@ P(next | prev3, prev2, prev1)
 
 ---
 
+# Building makemore Part 3: Activations & Gradients, BatchNorm
+
+**完整 Java 實現** - Andrej Karpathy's makemore Lecture 4
+
+## 🎯 專案概述
+
+實現**深層 MLP** (5個隱藏層) 並引入 **Batch Normalization**,解決深度網路訓練困難的核心問題。
+
+這是 makemore 系列中最具挑戰性的一課,因為它深入探討了**為什麼深度學習需要歸一化技術**。
+
+## 📊 與 Lecture 3 的關鍵對比
+
+| 特性 | Lecture 3 (MLP) | Lecture 4 (BatchNorm) |
+|------|-----------------|----------------------|
+| 隱藏層數 | **1 層** | **5 層** (深層網路) |
+| 層結構 | Linear + Tanh | **Linear + BatchNorm + Tanh** |
+| 參數量 | ~12k | **~47k** |
+| 訓練難度 | 簡單直接 | **需要 BatchNorm 才能訓練** |
+| Train Loss | ~2.11 | **~2.05** (更深更好) |
+| Dev Loss | ~2.15 | **~2.39** |
+| 主要挑戰 | 理解嵌入和 MLP | **診斷激活值和梯度** |
+
+## 🔬 核心問題: 為什麼深層網路難訓練?
+
+### 沒有 BatchNorm 的災難
+
+```
+訓練結果 (實際運行):
+Iter 0:   loss=18.24  ← 超級高!
+Iter 999: loss=4.75   ← 完全沒學到東西
+
+激活值統計:
+Layer 1: mean=-0.02, std=1.00, saturated=98.69%  ← 幾乎完全飽和!
+Layer 3: mean=+0.01, std=0.98, saturated=91.81%
+Layer 5: mean=+0.03, std=0.98, saturated=89.60%
+Layer 7: mean=+0.08, std=0.98, saturated=90.04%
+Layer 9: mean=+0.06, std=0.99, saturated=95.60%
+
+生成結果: (垃圾)
+```
+
+**問題根源:**
+
+1. **激活值飽和** - Tanh 輸出幾乎都是 ±1
+2. **梯度消失** - 飽和區域梯度 ≈ 0
+3. **訓練停滯** - 參數無法更新
+
+---
+
+### 有 BatchNorm 的成功
+
+```
+訓練結果 (實際運行):
+Iter 0:      loss=3.28   ← 正常初始值
+Iter 10000:  train≈2.23, dev≈2.56
+Iter 100000: train≈2.16, dev≈2.39
+Iter 199999: train≈2.03, dev≈2.39  ← 成功收斂!
+
+激活值統計:
+Layer 2:  mean=+0.01, std=0.63, saturated=2.93%  ✅ 健康!
+Layer 5:  mean=-0.01, std=0.65, saturated=3.27%  ✅
+Layer 8:  mean=-0.02, std=0.67, saturated=2.59%  ✅
+Layer 11: mean=-0.01, std=0.68, saturated=2.18%  ✅
+Layer 14: mean=-0.00, std=0.71, saturated=4.12%  ✅
+
+生成結果:
+1. elrio        ← 看起來像真名字!
+2. anna
+3. janni
+4. tyla
+5. kamiyah
+```
+
+**成功原因:** BatchNorm 強制每層激活值保持健康分佈!
+
+---
+
+## 🏗️ 網路架構
+
+```
+Input: [ch₁, ch₂, ch₃]  (3個字符索引)
+         ↓
+    Embedding (27 → 10)
+         ↓
+    Flatten (30)
+         ↓
+┌─────────────────────────────┐
+│ 有 BatchNorm:               │
+│                             │
+│  Linear(30 → 100, no bias)  │
+│  BatchNorm1d(100)           │ ← 關鍵層!
+│  Tanh                       │
+├─────────────────────────────┤
+│ 重複 4 次:                  │
+│  Linear(100 → 100, no bias) │
+│  BatchNorm1d(100)           │
+│  Tanh                       │
+├─────────────────────────────┤
+│  Linear(100 → 27, no bias)  │
+│  BatchNorm1d(27)            │
+└─────────────────────────────┘
+         ↓
+    Softmax
+```
+
+**關鍵設計決策:**
+
+1. **Linear 層不用 bias** - BatchNorm 的 beta 已提供偏移
+2. **每層後都接 BatchNorm** - 保持激活值穩定
+3. **最後一層也用 BatchNorm** - 讓初始預測不那麼自信
+
+---
+
+## 🔑 Batch Normalization 原理
+
+### 核心思想
+
+**在每一層後強制標準化激活值,讓訓練更穩定。**
+
+### 數學公式
+
+```python
+# Training mode (使用 batch 統計)
+mean = x.mean(0)                    # 計算 batch 均值
+var = x.var(0)                      # 計算 batch 方差
+x_norm = (x - mean) / sqrt(var + ε) # 標準化
+out = gamma * x_norm + beta         # 可學習的縮放和偏移
+
+# 更新 running 統計 (用於推理)
+running_mean = 0.9 * running_mean + 0.1 * mean
+running_var = 0.9 * running_var + 0.1 * var
+
+# Inference mode (使用 running 統計)
+x_norm = (x - running_mean) / sqrt(running_var + ε)
+out = gamma * x_norm + beta
+```
+
+### 參數說明
+
+- **gamma (scale)**: 可學習,初始化為 1
+- **beta (shift)**: 可學習,初始化為 0
+- **running_mean**: 不可學習,指數移動平均
+- **running_var**: 不可學習,指數移動平均
+- **epsilon (ε)**: 數值穩定性,通常 1e-5
+- **momentum**: 更新速度,通常 0.1
+
+### 為什麼有效?
+
+1. **穩定激活分佈** - 每層輸入都是 mean=0, std=1
+2. **減少內部協變量偏移** - 層間分佈不再漂移
+3. **允許更大學習率** - 訓練更快
+4. **正則化效果** - batch 統計引入噪音
+
+---
+
+## 💻 核心實現
+
+### 1. BatchNorm1d 層
+
+```java
+public class BatchNorm1d implements Layer {
+    private Tensor gamma;  // Scale (learnable)
+    private Tensor beta;   // Shift (learnable)
+    private double[] runningMean;  // Buffer
+    private double[] runningVar;   // Buffer
+    
+    public Tensor forward(Tensor x) {
+        if (training) {
+            // 使用 batch 統計
+            Tensor mean = x.mean(0);
+            Tensor variance = x.variance(0);
+            Tensor xNorm = (x - mean) / sqrt(variance + eps);
+            
+            // 更新 running 統計
+            runningMean = 0.9 * runningMean + 0.1 * mean;
+            runningVar = 0.9 * runningVar + 0.1 * variance;
+            
+            return gamma * xNorm + beta;
+        } else {
+            // 使用 running 統計
+            Tensor xNorm = (x - runningMean) / sqrt(runningVar + eps);
+            return gamma * xNorm + beta;
+        }
+    }
+}
+```
+
+### 2. Tensor 新增操作
+
+BatchNorm 需要這些新的張量操作:
+
+```java
+// 沿 batch 維度求均值
+Tensor mean(int dim)         // (batch, features) → (features,)
+
+// 沿 batch 維度求方差
+Tensor variance(int dim)     // (batch, features) → (features,)
+
+// 減法 (支持廣播)
+Tensor subtract(Tensor)      // (batch, features) - (features,)
+
+// 平方根
+Tensor sqrt()                // element-wise sqrt
+
+// 乘法 (支持廣播)
+Tensor mul(Tensor)           // (batch, features) * (features,)
+
+// 除法 (支持廣播) - 關鍵修復!
+Tensor div(Tensor)           // (batch, features) / (features,)
+```
+
+**重要:** `div()` 方法需要支持 `(batch, features) / (features,)` 的廣播,這是 BatchNorm 的核心需求!
+
+### 3. Layer 介面 (PyTorch 風格)
+
+```java
+public interface Layer {
+    Tensor forward(Tensor x);
+    List parameters();
+    void setTraining(boolean training);  // 切換訓練/推理模式
+    Tensor getOutput();                  // 用於診斷
+}
+```
+
+### 4. 深層 MLP 構建
+
+```java
+List layers = Arrays.asList(
+    new Linear(30, 100, false, rng), new BatchNorm1d(100), new TanhLayer(),
+    new Linear(100, 100, false, rng), new BatchNorm1d(100), new TanhLayer(),
+    new Linear(100, 100, false, rng), new BatchNorm1d(100), new TanhLayer(),
+    new Linear(100, 100, false, rng), new BatchNorm1d(100), new TanhLayer(),
+    new Linear(100, 100, false, rng), new BatchNorm1d(100), new TanhLayer(),
+    new Linear(100, 27, false, rng), new BatchNorm1d(27)
+);
+
+// 初始化最後一層 (讓初始預測不那麼自信)
+lastBatchNorm.getGamma() *= 0.1;
+```
+
+---
+
+## 📈 訓練過程與結果
+
+### 實驗設計
+
+我們進行了**兩個對照實驗**:
+
+1. **實驗 1: 沒有 BatchNorm** (預期失敗)
+2. **實驗 2: 有 BatchNorm** (預期成功)
+
+### 超參數
+
+```java
+vocabSize = 27
+blockSize = 3
+embeddingDim = 10
+hiddenSize = 100
+numHiddenLayers = 5
+
+batchSize = 32
+learningRate = 0.1 (前 150k 次)
+              0.01 (後 50k 次)
+maxIterations = 200000
+```
+
+### 實驗 1 結果: WITHOUT BatchNorm ❌
+
+```
+訓練曲線:
+Iter 0:   loss=18.24, train≈17.07, dev≈17.15  ← 隨機猜測
+Iter 999: loss=4.75,  train≈3.96,  dev≈4.07   ← 沒有改善!
+
+激活值診斷:
+Layer 1: saturated=98.69%  ← 災難!
+Layer 3: saturated=91.81%
+Layer 5: saturated=89.60%
+Layer 7: saturated=90.04%
+Layer 9: saturated=95.60%
+
+結論: 深層網路完全無法訓練! ❌
+```
+
+**為什麼失敗?**
+
+- 激活值幾乎全部飽和 (>90%)
+- Tanh 在飽和區域梯度 ≈ 0
+- 梯度無法反向傳播
+- 參數無法更新
+
+---
+
+### 實驗 2 結果: WITH BatchNorm ✅
+
+```
+訓練曲線:
+Iter 0:      loss=3.28,  train≈3.36,  dev≈3.34   ← 正常初始化
+Iter 10000:  loss=2.37,  train≈2.23,  dev≈2.56   ← 快速下降
+Iter 100000: loss=2.24,  train≈2.16,  dev≈2.39   ← 持續改善
+Iter 150000: 學習率降至 0.01                      ← LR decay
+Iter 199999: loss=2.13,  train≈2.03,  dev≈2.39   ← 收斂!
+
+激活值診斷:
+Layer 2:  mean=+0.01, std=0.63, saturated=2.93%  ✅ 健康!
+Layer 5:  mean=-0.01, std=0.65, saturated=3.27%  ✅
+Layer 8:  mean=-0.02, std=0.67, saturated=2.59%  ✅
+Layer 11: mean=-0.01, std=0.68, saturated=2.18%  ✅
+Layer 14: mean=-0.00, std=0.71, saturated=4.12%  ✅
+
+最終評估:
+Train loss: 2.05  ← 比 Lecture 3 (2.11) 更好!
+Dev loss:   2.39
+Test loss:  2.46
+
+生成樣本 (質量很好!):
+1. elrio          11. lytka
+2. davdanamaria   12. paileah
+3. janni          13. caiya
+4. raley          14. tyla
+5. anna           15. keadiaup
+6. ridsing        16. mykentleigh
+7. man            17. graycensley
+8. dedi           18. amarelde
+9. jeelee         19. kamiyah
+10. janiella      20. suthenishia
+
+結論: BatchNorm 讓深層網路成功訓練! ✅
+```
+
+**成功關鍵:**
+
+- 激活值飽和率 < 5% (健康範圍)
+- 每層 mean ≈ 0, std ≈ 0.6-0.7
+- 梯度順利反向傳播
+- Loss 穩定下降
+
+---
+
+## 📊 性能對比總結
+
+| Model | 深度 | Loss (Train) | Loss (Dev) | 激活飽和率 | 訓練狀態 |
+|-------|------|-------------|-----------|-----------|---------|
+| Lecture 3 (1層) | 淺 | 2.11 | 2.15 | ~5% | ✅ 成功 |
+| Lecture 4 無BN (5層) | 深 | 3.96 | 4.07 | **95%** | ❌ 失敗 |
+| Lecture 4 有BN (5層) | 深 | **2.05** | 2.39 | **3%** | ✅ 成功 |
+
+**關鍵發現:**
+
+1. 深層網路 **沒有 BatchNorm** → 訓練失敗
+2. 深層網路 **有 BatchNorm** → 訓練成功,性能更好
+3. BatchNorm 是訓練深度網路的**關鍵技術**
+
+---
+
+## 🔍 診斷工具
+
+### 激活值統計分析
+
+```java
+DiagnosticTools.analyzeActivations(layers, "After training");
+
+// 輸出:
+// Layer 2 (TanhLayer): mean=+0.01, std=0.63, saturated=2.93%
+```
+
+**健康標準:**
+
+- ✅ mean ≈ 0 (中心化)
+- ✅ std ≈ 0.6-0.7 (適中方差)
+- ✅ saturation < 5% (很少飽和)
+
+**不健康標準:**
+
+- ❌ mean 離 0 很遠 (偏移)
+- ❌ std 太小或太大 (方差異常)
+- ❌ saturation > 90% (幾乎全飽和)
+
+### 飽和度計算
+
+```java
+// Tanh 飽和定義: |tanh(x)| > 0.99
+saturated = count(|activation| > 0.99) / total
+```
+
+---
+
+## 💡 關鍵洞察
+
+### 1. 為什麼 Linear 層不用 bias?
+
+```java
+// 沒有 BatchNorm:
+Linear(x) = W @ x + b  ← 需要 bias
+
+// 有 BatchNorm:
+Linear(x) = W @ x             ← 不需要 bias!
+BN(x) = gamma * normalize(x) + beta  ← beta 提供偏移
+
+// 結論: BatchNorm 的 beta 已經提供了偏移功能
+// 添加 bias 是多餘的
+```
+
+### 2. 訓練 vs 推理的差異
+
+```
+訓練模式 (training=True):
+  - 使用當前 batch 統計 (mean, var)
+  - 更新 running 統計
+  - 引入批次間的噪音 (正則化效果)
+
+推理模式 (training=False):
+  - 使用 running 統計
+  - 每個樣本獨立處理
+  - 結果穩定可重現
+```
+
+**為什麼需要 running 統計?**
+
+- 推理時可能只有 1 個樣本,無法計算 batch 統計
+- Running 統計代表整個訓練集的分佈
+- 通過指數移動平均平滑更新
+
+### 3. BatchNorm 的副作用
+
+**優點:**
+
+- ✅ 穩定訓練深層網路
+- ✅ 允許更大學習率
+- ✅ 減少對初始化的依賴
+- ✅ 隱含的正則化效果
+
+**缺點:**
+
+- ❌ 訓練/推理不一致
+- ❌ 對 batch size 敏感 (小 batch 不穩定)
+- ❌ 在 RNN 中難以應用
+- ❌ 代碼複雜,容易出 bug
+- ❌ 耦合 batch 中的樣本 (破壞獨立性)
+
+### 4. 其他歸一化方法
+
+```
+BatchNorm   - 沿 batch 維度歸一化 (本課重點)
+LayerNorm   - 沿 feature 維度歸一化 (Transformer 用)
+GroupNorm   - 分組歸一化 (小 batch 友好)
+InstanceNorm - 單樣本歸一化 (風格遷移)
+```
+
+---
+
+## 🐛 常見問題與調試
+
+### Q1: `div()` 方法報錯 "Incompatible shapes"
+
+**症狀:**
+```
+Error: Incompatible shapes for division
+BatchNorm forward 失敗
+```
+
+**原因:** 你的 `Tensor.div()` 不支持 `(batch, features) / (features,)` 的廣播
+
+**解決:**
+```java
+// 需要在 div() 中添加這個 case:
+if (shape.length == 2 && other.shape.length == 1 && shape[1] == other.shape[0]) {
+    // Broadcasting: (batch, features) / (features,)
+    // 實現廣播除法...
+}
+```
+
+參考 `TENSOR_div_FIXED.java` 中的完整實現。
+
+---
+
+### Q2: OutOfMemoryError (Java heap space)
+
+**症狀:**
+```
+Exception in thread "main" java.lang.OutOfMemoryError: Java heap space
+```
+
+**原因:**
+
+1. 每次迭代評估整個訓練集 (182k 樣本)
+2. 計算圖不斷累積
+3. 中間張量沒釋放
+
+**解決:**
+
+1. **增加堆記憶體:**
+   ```
+   VM options: -Xms1g -Xmx2g
+   ```
+
+2. **使用抽樣評估:**
+   ```java
+   // 不要評估整個集合
+   double loss = evaluate(model, allData, allLabels);  // ❌
+   
+   // 只評估 500 個樣本
+   double loss = evaluateSample(model, data, labels, 500, rng);  // ✅
+   ```
+
+3. **減少評估頻率:**
+   ```java
+   // 每 10000 次迭代才評估
+   if (iter % 10000 == 0) {
+       evaluate(...);
+   }
+   ```
+
+4. **定期 GC:**
+   ```java
+   if (iter % 1000 == 0) {
+       System.gc();
+   }
+   ```
+
+---
+
+### Q3: Loss 不下降 (WITH BatchNorm 也不行)
+
+**可能原因:**
+
+1. **學習率太大或太小**
+   ```java
+   lr = 0.1;  // 試試 0.01 或 0.5
+   ```
+
+2. **初始化問題**
+   ```java
+   // 最後一層應該乘以小數
+   lastBatchNorm.getGamma() *= 0.1;  // 很重要!
+   ```
+
+3. **梯度沒有流動**
+   ```java
+   // 檢查梯度
+   double gradNorm = calculateGradNorm(parameters);
+   System.out.println("Grad norm: " + gradNorm);
+   // 期望 > 0
+   ```
+
+---
+
+### Q4: 激活值還是飽和 (即使用了 BatchNorm)
+
+**檢查清單:**
+
+1. **確認 BatchNorm 在訓練模式**
+   ```java
+   model.setTrainMode();  // 必須!
+   ```
+
+2. **確認層的順序**
+   ```java
+   // 正確:
+   Linear → BatchNorm → Tanh
+   
+   // 錯誤:
+   Linear → Tanh → BatchNorm  // BatchNorm 放錯位置!
+   ```
+
+3. **檢查 forward 是否調用了 BatchNorm**
+   ```java
+   for (Layer layer : layers) {
+       x = layer.forward(x);  // 確保每層都被調用
+   }
+   ```
+
+---
+
+## 📁 專案結構
+
+```
+makemore-batchnorm/
+├── src/main/java/com/makemore/
+│   ├── Main.java                    # 主程式 (雙重實驗)
+│   ├── DeepMLP.java                 # 深層 MLP 模型
+│   ├── DataLoader.java              # 數據加載器
+│   │
+│   ├── layers/                      # 層實現
+│   │   ├── Layer.java               # 層介面
+│   │   ├── Linear.java              # 全連接層
+│   │   ├── BatchNorm1d.java         # ⭐ BatchNorm 層
+│   │   └── TanhLayer.java           # Tanh 激活層
+│   │
+│   ├── mlp/
+│   │   └── Tensor.java              # 張量 (需要新增操作)
+│   │
+│   └── utils/
+│       └── DiagnosticTools.java     # 診斷工具
+│
+├── names.txt                        # 訓練數據
+├── pom.xml                          # Maven 配置
+└── README.md                        # 本文件
+```
+
+---
+
+## 🚀 使用方法
+
+### 編譯運行
+
+```bash
+# 使用 Maven
+mvn clean compile exec:java
+
+# VM options (推薦)
+-Xms1g -Xmx2g
+
+# 預期運行時間
+實驗 1 (無 BatchNorm): ~1 分鐘
+實驗 2 (有 BatchNorm): ~30-60 分鐘 (200k iterations)
+```
+
+### 快速測試 (減少迭代次數)
+
+如果想快速看到效果,可以修改 `Main.java`:
+
+```java
+// 從 200000 改成 50000
+trainModel(modelWithBN, dataLoader, 50000, 0.1, 32, true);
+```
+
+預期結果:
+```
+50k 次:  loss ≈ 2.3-2.4  (5-10 分鐘)
+200k 次: loss ≈ 2.0-2.1  (30-60 分鐘)
+```
+
+---
+
+## 📚 學習路徑
+
+```
+✅ Lecture 1: Micrograd (scalar autograd)
+✅ Lecture 2: Bigrams (simple language model)  
+✅ Lecture 3: MLP (embeddings + hidden layers)
+✅ Lecture 4: BatchNorm (deep networks + diagnostics)  ← 你在這裡
+⬜ Lecture 5: Manual Backprop (gradient ninja)
+⬜ Lecture 6: WaveNet (convolutional architecture)
+⬜ Lecture 7: GPT (transformer)
+⬜ Lecture 8: Tokenizer (BPE)
+```
+
+---
+
+## 🎓 核心收穫
+
+### 1. 深度學習的歷史難題
+
+**2015 年之前:**
+- 訓練深層網路幾乎不可能
+- 需要極其小心的初始化
+- 梯度消失/爆炸是常態
+- 網路深度 < 10 層
+
+**BatchNorm (2015) 之後:**
+- 可以訓練 50-100 層網路
+- 對初始化不那麼敏感
+- 訓練穩定可靠
+- 開啟了深度學習的黃金時代
+
+### 2. 現代深度網路的標準模式
+
+```
+Input
+  ↓
+[Linear → Normalization → Activation] × N
+  ↓
+Output
+
+這個模式貫穿現代所有架構:
+- ResNet, VGG (圖像)
+- Transformer, BERT (語言)
+- WaveNet (音頻)
+```
+
+### 3. 診斷思維
+
+**不只是訓練模型,更要診斷模型:**
+
+1. 監控激活值統計 (mean, std, saturation)
+2. 監控梯度流動 (grad norm, update ratio)
+3. 可視化每層的行為
+4. 理解模型為什麼成功/失敗
+
+這種**診斷思維**是成為深度學習專家的關鍵!
+
+---
