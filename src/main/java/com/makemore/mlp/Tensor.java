@@ -14,9 +14,9 @@ public class Tensor {
 
     // For autograd
     private double[] grad;
-    private Function<Void, Void> backward;
-    private Set<Tensor> prev;
-    private String op;
+    public Function<Void, Void> backward;
+    public Set<Tensor> prev;
+    public String op;
     private boolean requiresGrad;
 
     // Constructor
@@ -1420,5 +1420,248 @@ public class Tensor {
 
         return out;
     }
+
+    /**
+     * Concatenate tensors along a dimension
+     *
+     * @param tensors List of tensors to concatenate
+     * @param dim Dimension along which to concatenate (0 or 1 for 2D)
+     * @return Concatenated tensor
+     *
+     * Example:
+     *   t1 = Tensor([[1, 2], [3, 4]])  // shape (2, 2)
+     *   t2 = Tensor([[5, 6], [7, 8]])  // shape (2, 2)
+     *   concat([t1, t2], dim=0) → shape (4, 2)  // vertical stack
+     *   concat([t1, t2], dim=1) → shape (2, 4)  // horizontal stack
+     */
+    public static Tensor concat(List<Tensor> tensors, int dim) {
+        if (tensors == null || tensors.isEmpty()) {
+            throw new IllegalArgumentException("Cannot concatenate empty list");
+        }
+
+        if (tensors.size() == 1) {
+            return tensors.get(0).copy();
+        }
+
+        // Get reference shape and check compatibility
+        Tensor first = tensors.get(0);
+        int[] refShape = first.getShape();
+        int ndim = refShape.length;
+
+        if (dim < 0 || dim >= ndim) {
+            throw new IllegalArgumentException("Invalid dimension: " + dim);
+        }
+
+        // Check all tensors have same shape except along concat dimension
+        int totalSize = refShape[dim];
+        for (int i = 1; i < tensors.size(); i++) {
+            int[] shape = tensors.get(i).getShape();
+            if (shape.length != ndim) {
+                throw new IllegalArgumentException("All tensors must have same number of dimensions");
+            }
+            for (int d = 0; d < ndim; d++) {
+                if (d != dim && shape[d] != refShape[d]) {
+                    throw new IllegalArgumentException("Incompatible shapes for concatenation");
+                }
+            }
+            totalSize += shape[dim];
+        }
+
+        // Calculate output shape
+        int[] outShape = refShape.clone();
+        outShape[dim] = totalSize;
+
+        // For 2D tensors (most common case in WaveNet)
+        if (ndim == 2) {
+            if (dim == 0) {
+                // Concatenate along rows (vertical stack)
+                return concatDim0(tensors, outShape);
+            } else {
+                // Concatenate along columns (horizontal stack)
+                return concatDim1(tensors, outShape);
+            }
+        }
+
+        throw new UnsupportedOperationException("concat only supports 2D tensors currently");
+    }
+
+    /**
+     * Helper: Concatenate along dimension 0 (rows)
+     */
+    private static Tensor concatDim0(List<Tensor> tensors, int[] outShape) {
+        int rows = outShape[0];
+        int cols = outShape[1];
+
+        double[] result = new double[rows * cols];
+
+        int rowOffset = 0;
+        for (Tensor t : tensors) {
+            double[] tData = t.getData();
+            int[] tShape = t.getShape();
+            int tRows = tShape[0];
+
+            // Copy rows from this tensor
+            System.arraycopy(tData, 0, result, rowOffset * cols, tRows * cols);
+            rowOffset += tRows;
+        }
+
+        // Check if any tensor requires grad
+        boolean requiresGrad = tensors.stream().anyMatch(t -> t.requiresGrad);
+
+        Tensor out = new Tensor(result, outShape, requiresGrad);
+
+        if (requiresGrad) {
+            // Store references for backward
+            for (Tensor t : tensors) {
+                out.prev.add(t);
+            }
+            out.op = "concat_dim0";
+
+            out.backward = (v) -> {
+                int offset = 0;
+                for (Tensor t : tensors) {
+                    if (t.requiresGrad) {
+                        int[] tShape = t.getShape();
+                        int tRows = tShape[0];
+                        double[] tGrad = t.getGrad();
+
+                        // Scatter gradient back
+                        for (int i = 0; i < tRows * cols; i++) {
+                            tGrad[i] += out.grad[offset * cols + i];
+                        }
+                        offset += tRows;
+                    }
+                }
+                return null;
+            };
+        }
+
+        return out;
+    }
+
+    /**
+     * Helper: Concatenate along dimension 1 (columns)
+     */
+    private static Tensor concatDim1(List<Tensor> tensors, int[] outShape) {
+        int rows = outShape[0];
+        int cols = outShape[1];
+
+        double[] result = new double[rows * cols];
+
+        // For each row, concatenate columns from all tensors
+        int colOffset = 0;
+        int[] colSizes = new int[tensors.size()];
+
+        for (int i = 0; i < tensors.size(); i++) {
+            colSizes[i] = tensors.get(i).getShape()[1];
+        }
+
+        for (int row = 0; row < rows; row++) {
+            colOffset = 0;
+            for (int t = 0; t < tensors.size(); t++) {
+                Tensor tensor = tensors.get(t);
+                double[] tData = tensor.getData();
+                int tCols = colSizes[t];
+
+                // Copy this tensor's columns for this row
+                System.arraycopy(tData, row * tCols, result, row * cols + colOffset, tCols);
+                colOffset += tCols;
+            }
+        }
+
+        boolean requiresGrad = tensors.stream().anyMatch(Tensor::isRequiresGrad);
+
+        Tensor out = new Tensor(result, outShape, requiresGrad);
+
+        if (requiresGrad) {
+            for (Tensor t : tensors) {
+                out.prev.add(t);
+            }
+            out.op = "concat_dim1";
+
+            out.backward = (v) -> {
+                for (int row = 0; row < rows; row++) {
+                    int offset = 0;
+                    for (int t = 0; t < tensors.size(); t++) {
+                        Tensor tensor = tensors.get(t);
+                        if (tensor.requiresGrad) {
+                            int tCols = colSizes[t];
+                            double[] tGrad = tensor.getGrad();
+
+                            // Scatter gradient back for this row
+                            for (int col = 0; col < tCols; col++) {
+                                tGrad[row * tCols + col] += out.grad[row * cols + offset + col];
+                            }
+                        }
+                        offset += colSizes[t];
+                    }
+                }
+                return null;
+            };
+        }
+
+        return out;
+    }
+
+    /**
+     * Flatten tensor dimensions from startDim to endDim (inclusive)
+     *
+     * @param startDim First dimension to flatten
+     * @param endDim Last dimension to flatten (-1 means last dimension)
+     * @return Flattened tensor
+     *
+     * Example:
+     *   x.shape = (2, 3, 4, 5)
+     *   x.flatten(1, 2).shape = (2, 12, 5)  // flatten dims 1,2 → 3*4=12
+     *   x.flatten(1, -1).shape = (2, 60)     // flatten all after dim 0
+     */
+    public Tensor flatten(int startDim, int endDim) {
+        if (endDim == -1) {
+            endDim = shape.length - 1;
+        }
+
+        if (startDim < 0 || endDim >= shape.length || startDim > endDim) {
+            throw new IllegalArgumentException("Invalid flatten dimensions");
+        }
+
+        // If no flattening needed
+        if (startDim == endDim) {
+            return this;
+        }
+
+        // Calculate new shape
+        List<Integer> newShapeList = new ArrayList<>();
+
+        // Keep dimensions before startDim
+        for (int i = 0; i < startDim; i++) {
+            newShapeList.add(shape[i]);
+        }
+
+        // Flatten dimensions from startDim to endDim
+        int flattenedSize = 1;
+        for (int i = startDim; i <= endDim; i++) {
+            flattenedSize *= shape[i];
+        }
+        newShapeList.add(flattenedSize);
+
+        // Keep dimensions after endDim
+        for (int i = endDim + 1; i < shape.length; i++) {
+            newShapeList.add(shape[i]);
+        }
+
+        int[] newShape = newShapeList.stream().mapToInt(Integer::intValue).toArray();
+
+        // Use view() since flatten doesn't change data order
+        return this.view(newShape);
+    }
+
+
+    /**
+     * Check if this tensor requires gradient
+     */
+    public boolean isRequiresGrad() {
+        return requiresGrad;
+    }
+
 
 }

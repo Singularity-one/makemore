@@ -66,25 +66,71 @@ public class BatchNorm1d implements Layer {
         this(numFeatures, 1e-5, 0.1);
     }
 
+    /**
+     *
+     * 修正：支援 3D 輸入 (batch, seq, features)
+     *
+     * PyTorch BatchNorm1d 行為：
+     * - 2D input (batch, features): normalize across batch
+     * - 3D input (batch, seq, features): normalize across batch AND seq
+     *
+     * 我們採用 3D 輸入時的處理方式：
+     * - 將 (batch, seq, features) reshape 成 (batch*seq, features)
+     * - 當作 2D 處理
+     * - reshape 回 (batch, seq, features)
+     */
     @Override
     public Tensor forward(Tensor x) {
-        // x shape: (batch, numFeatures)
+        int[] xShape = x.getShape();
+        boolean is3D = (xShape.length == 3);
+
+        Tensor x2d;
+        int originalBatch = 0;
+        int originalSeq = 0;
+
+        // If 3D, reshape to 2D first
+        if (is3D) {
+            // (batch, seq, features) → (batch*seq, features)
+            originalBatch = xShape[0];
+            originalSeq = xShape[1];
+            int features = xShape[2];
+
+            if (features != numFeatures) {
+                throw new IllegalArgumentException(
+                        "Expected " + numFeatures + " features, got " + features);
+            }
+
+            x2d = x.view(originalBatch * originalSeq, features);
+        } else if (xShape.length == 2) {
+            // Already 2D: (batch, features)
+            if (xShape[1] != numFeatures) {
+                throw new IllegalArgumentException(
+                        "Expected " + numFeatures + " features, got " + xShape[1]);
+            }
+            x2d = x;
+        } else {
+            throw new IllegalArgumentException(
+                    "BatchNorm1d expects 2D or 3D input, got " + xShape.length + "D");
+        }
+
+        // Now process as 2D
+        Tensor out2d;
 
         if (training) {
             // Training mode: use batch statistics
 
             // Calculate batch mean and variance
-            Tensor mean = x.mean(0);  // Shape: (numFeatures,)
-            Tensor variance = x.variance(0);  // Shape: (numFeatures,)
+            Tensor mean = x2d.mean(0);  // Shape: (numFeatures,)
+            Tensor variance = x2d.variance(0);  // Shape: (numFeatures,)
 
             // Normalize: (x - mean) / sqrt(var + eps)
-            Tensor xCentered = x.subtract(mean);
+            Tensor xCentered = x2d.subtract(mean);
             Tensor varPlusEps = variance.add(eps);
             Tensor std = varPlusEps.sqrt();
             Tensor xNorm = xCentered.div(std);
 
             // Scale and shift: gamma * xNorm + beta
-            out = xNorm.mul(gamma).add(beta);
+            out2d = xNorm.mul(gamma).add(beta);
 
             // Update running statistics (no gradient!)
             double[] meanData = mean.getData();
@@ -103,13 +149,20 @@ public class BatchNorm1d implements Layer {
             Tensor variance = new Tensor(runningVar.clone(), new int[]{numFeatures});
 
             // Normalize
-            Tensor xCentered = x.subtract(mean);
+            Tensor xCentered = x2d.subtract(mean);
             Tensor varPlusEps = variance.add(eps);
             Tensor std = varPlusEps.sqrt();
             Tensor xNorm = xCentered.div(std);
 
             // Scale and shift
-            out = xNorm.mul(gamma).add(beta);
+            out2d = xNorm.mul(gamma).add(beta);
+        }
+
+        // If input was 3D, reshape back
+        if (is3D) {
+            out = out2d.view(originalBatch, originalSeq, numFeatures);
+        } else {
+            out = out2d;
         }
 
         return out;

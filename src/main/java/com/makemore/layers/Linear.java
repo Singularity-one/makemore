@@ -31,10 +31,10 @@ public class Linear implements Layer {
         this.outFeatures = outFeatures;
         this.useBias = bias;
 
-        // Initialize weights with proper scaling
-        // Kaiming initialization: std = sqrt(2 / fan_in) for ReLU
-        // For Tanh, we use std = sqrt(1 / fan_in) or just randn
-        weight = Tensor.randn(rng, inFeatures, outFeatures);
+        // Kaiming/He initialization for Tanh
+        double scale = Math.sqrt(1.0 / inFeatures);
+
+        weight = Tensor.randn(rng, inFeatures, outFeatures).mul(scale);
         weight.requiresGrad(true);
 
         if (bias) {
@@ -45,17 +45,66 @@ public class Linear implements Layer {
         }
     }
 
+    /**
+     *
+     * 修正：支援任意維度輸入，只對最後一維做線性變換
+     *
+     * 支援的輸入形狀：
+     * - 2D: (batch, in_features) → (batch, out_features)
+     * - 3D: (batch, seq, in_features) → (batch, seq, out_features)
+     * - 4D: (batch, d1, d2, in_features) → (batch, d1, d2, out_features)
+     *
+     * 這符合 PyTorch nn.Linear 的行為
+     */
     @Override
     public Tensor forward(Tensor x) {
-        // x: (batch, inFeatures)
-        // weight: (inFeatures, outFeatures)
-        // out: (batch, outFeatures)
+        int[] xShape = x.getShape();
 
-        out = x.matmul(weight);
+        // Check last dimension matches in_features
+        int lastDim = xShape[xShape.length - 1];
+        if (lastDim != inFeatures) {
+            throw new IllegalArgumentException(
+                    "Expected last dimension to be " + inFeatures + ", got " + lastDim);
+        }
+
+        // Case 1: 2D input (batch, in_features) - original behavior
+        if (xShape.length == 2) {
+            out = x.matmul(weight);
+
+            if (bias != null) {
+                out = out.add(bias);
+            }
+
+            return out;
+        }
+
+        // Case 2: 3D or higher - reshape, matmul, reshape back
+        // Example: (batch, seq, in_features) → (batch*seq, in_features) → matmul → (batch*seq, out_features) → (batch, seq, out_features)
+
+        // Calculate total number of "rows" (everything except last dimension)
+        int batchSize = 1;
+        for (int i = 0; i < xShape.length - 1; i++) {
+            batchSize *= xShape[i];
+        }
+
+        // Reshape to 2D: (batch_size, in_features)
+        Tensor x2d = x.view(batchSize, inFeatures);
+
+        // Apply linear transformation
+        Tensor out2d = x2d.matmul(weight);
 
         if (bias != null) {
-            out = out.add(bias);
+            out2d = out2d.add(bias);
         }
+
+        // Reshape back to original shape (with out_features in last dimension)
+        int[] outShape = new int[xShape.length];
+        for (int i = 0; i < xShape.length - 1; i++) {
+            outShape[i] = xShape[i];
+        }
+        outShape[xShape.length - 1] = outFeatures;
+
+        out = out2d.view(outShape);
 
         return out;
     }
