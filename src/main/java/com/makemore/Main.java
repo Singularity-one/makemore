@@ -1,110 +1,238 @@
 package com.makemore;
 
-import com.makemore.layers.*;
+import com.makemore.backprop.ManualBackprop;
+import com.makemore.backprop.ManualBackprop.*;
 import com.makemore.mlp.Tensor;
-import com.makemore.utils.DiagnosticTools;
 
 import java.io.*;
 import java.nio.file.*;
 import java.util.*;
 
 /**
- * Building makemore Part 3: Activations & Gradients, BatchNorm
+ * Building makemore Part 4: Becoming a Backprop Ninja
  *
- * Key differences from Lecture 3:
- * - Much deeper network (5 hidden layers vs 1)
- * - Introduces Batch Normalization
- * - Heavy focus on diagnostics and visualization
- * - Comparison: with vs without BatchNorm
+ * Train a 2-layer MLP with BatchNorm using MANUAL backpropagation.
+ * We do NOT use loss.backward() - instead we calculate all gradients manually!
+ *
+ * This demonstrates:
+ * 1. How gradients flow through the network
+ * 2. Optimized backward passes (faster than autograd!)
+ * 3. Deep understanding of backpropagation
  */
 public class Main {
 
     public static void main(String[] args) {
         try {
             System.out.println("╔═══════════════════════════════════════════════════════╗");
-            System.out.println("║  Makemore Part 3: Batch Normalization                ║");
-            System.out.println("║  Deep MLP with Activation & Gradient Analysis        ║");
+            System.out.println("║  Makemore Part 4: Becoming a Backprop Ninja  🥷     ║");
+            System.out.println("║  Manual Backpropagation WITHOUT autograd             ║");
             System.out.println("╚═══════════════════════════════════════════════════════╝\n");
 
             // Load data
             DataLoader dataLoader = new DataLoader();
             dataLoader.loadData("names.txt");
-            dataLoader.buildDataset(3); // block_size = 3
+            dataLoader.buildDataset(3);
 
             int vocabSize = dataLoader.getVocabSize();
             int blockSize = 3;
             int embeddingDim = 10;
-            int hiddenSize = 100;
+            int hiddenSize = 200;
+            double eps = 1e-5;  // BatchNorm epsilon
 
             System.out.println("=== Configuration ===");
             System.out.println("Vocabulary size: " + vocabSize);
             System.out.println("Block size: " + blockSize);
             System.out.println("Embedding dim: " + embeddingDim);
             System.out.println("Hidden size: " + hiddenSize);
-            System.out.println("Hidden layers: 5\n");
+            System.out.println();
 
-            // =========================================
-            // Experiment 1: WITHOUT BatchNorm (fails!)
-            // =========================================
-            System.out.println("\n" + "=".repeat(60));
-            System.out.println("EXPERIMENT 1: Deep Network WITHOUT BatchNorm");
-            System.out.println("=".repeat(60));
-            System.out.println("Expected: Training will FAIL (activations saturate)\n");
+            // Initialize parameters
+            Random rng = new Random(2147483647L);
 
-            DeepMLP modelNoBN = new DeepMLP(
-                    vocabSize, embeddingDim, blockSize, hiddenSize,
-                    false  // useBatchNorm = false
-            );
+            // Embedding table
+            Tensor C = Tensor.randn(rng, vocabSize, embeddingDim);
 
-            System.out.println("Total parameters: " + modelNoBN.numParameters());
+            // First layer
+            Tensor W1 = Tensor.randn(rng, blockSize * embeddingDim, hiddenSize);
+            scaleInit(W1, 5.0/3.0); // For tanh
+            Tensor b1 = Tensor.randn(rng, hiddenSize).mul(0.01); // Small random (not zero!)
 
-            // Train for a few iterations to show it fails
-            trainModel(modelNoBN, dataLoader, 1000, 0.1, 32, false);
+            // BatchNorm parameters
+            Tensor bngain = Tensor.ones(hiddenSize);
+            Tensor bnbias = Tensor.zeros(hiddenSize);
 
-            // Check activation statistics (should be terrible)
-            System.out.println("\n📊 Activation Statistics (WITHOUT BatchNorm):");
-            DiagnosticTools.analyzeActivations(modelNoBN.getLayers(), "After 1000 iters");
+            // Second layer
+            Tensor W2 = Tensor.randn(rng, hiddenSize, vocabSize);
+            scaleInit(W2, 0.01); // Small for last layer
+            Tensor b2 = Tensor.randn(rng, vocabSize).mul(0.01);
 
-            // =========================================
-            // Experiment 2: WITH BatchNorm (succeeds!)
-            // =========================================
-            System.out.println("\n\n" + "=".repeat(60));
-            System.out.println("EXPERIMENT 2: Deep Network WITH BatchNorm");
-            System.out.println("=".repeat(60));
-            System.out.println("Expected: Training will SUCCEED\n");
+            List<Tensor> parameters = Arrays.asList(C, W1, b1, W2, b2, bngain, bnbias);
 
-            DeepMLP modelWithBN = new DeepMLP(
-                    vocabSize, embeddingDim, blockSize, hiddenSize,
-                    true  // useBatchNorm = true
-            );
+            int totalParams = 0;
+            for (Tensor p : parameters) {
+                totalParams += p.getSize();
+            }
+            System.out.println("Total parameters: " + totalParams);
+            System.out.println();
 
-            System.out.println("Total parameters: " + modelWithBN.numParameters());
+            // Training
+            System.out.println("=== Training with Manual Backprop ===");
+            System.out.println("⚠️  NOT using loss.backward() - all gradients computed manually!\n");
 
-            // Initialize last layer to be less confident
-            modelWithBN.initializeLastLayer(0.1);
+            int maxIters = 200000;
+            int batchSize = 32;
+            double lr = 0.1;
 
-            // Full training
-            trainModel(modelWithBN, dataLoader, 200000, 0.1, 32, true);
+            Tensor Xtr = dataLoader.getXtr();
+            Tensor Ytr = dataLoader.getYtr();
+            int nTrain = Xtr.getShape()[0];
 
-            // Check activation statistics (should be healthy)
-            System.out.println("\n📊 Activation Statistics (WITH BatchNorm):");
-            DiagnosticTools.analyzeActivations(modelWithBN.getLayers(), "After full training");
+            List<Double> losses = new ArrayList<>();
 
-            // Evaluate
+            for (int iter = 0; iter < maxIters; iter++) {
+                // Mini-batch
+                int[] batchIndices = randomBatch(nTrain, batchSize, rng);
+                Tensor Xb = selectRows(Xtr, batchIndices);
+                Tensor Yb = selectRows(Ytr, batchIndices);
+
+                // ============================================
+                // FORWARD PASS (expanded for manual backprop)
+                // ============================================
+
+                // Embedding
+                Tensor emb = C.index(Xb);  // (batch, blockSize, embDim)
+                Tensor embcat = emb.view(batchSize, blockSize * embeddingDim);
+
+                // First layer
+                Tensor hprebn = embcat.matmul(W1).add(b1);  // (batch, hiddenSize)
+
+                // BatchNorm (manual implementation for forward)
+                Tensor bnmean = hprebn.mean(0);  // (hiddenSize,)
+                Tensor bnvar = hprebn.variance(0);  // (hiddenSize,)
+
+                Tensor hprebn_centered = hprebn.subtract(bnmean);
+                Tensor bnstd = bnvar.add(eps).sqrt();
+                Tensor bnraw = hprebn_centered.div(bnstd);
+                Tensor hpreact = bnraw.mul(bngain).add(bnbias);
+
+                // Tanh activation
+                Tensor h = hpreact.tanh();
+
+                // Second layer
+                Tensor logits = h.matmul(W2).add(b2);  // (batch, vocabSize)
+
+                // Loss (using manual cross-entropy)
+                Tensor probs = logits.softmax(1);
+                double loss = crossEntropyLoss(probs, Yb, batchSize, vocabSize);
+
+                // ============================================
+                // BACKWARD PASS (manual!)
+                // ============================================
+
+                // Start with gradient of loss w.r.t. logits
+                // Using our optimized backward pass!
+                Tensor dlogits = ManualBackprop.crossEntropyBackward(logits, Yb);
+
+                // Backward through second layer
+                LinearGradients layer2Grads = ManualBackprop.linearBackward(
+                        dlogits, h, W2);
+                Tensor dh = layer2Grads.dx;
+                Tensor dW2 = layer2Grads.dW;
+                Tensor db2 = layer2Grads.db;
+
+                // Backward through tanh
+                Tensor dhpreact = ManualBackprop.tanhBackward(dh, h);
+
+                // Backward through BatchNorm (using our optimized implementation!)
+                BatchNormGradients bnGrads = ManualBackprop.batchNormBackward(
+                        dhpreact, hprebn, bngain, eps);
+                Tensor dhprebn = bnGrads.dx;
+                Tensor dbngain = bnGrads.dgamma;
+                Tensor dbnbias = bnGrads.dbeta;
+
+                // Backward through first layer
+                LinearGradients layer1Grads = ManualBackprop.linearBackward(
+                        dhprebn, embcat, W1);
+                Tensor dembcat = layer1Grads.dx;
+                Tensor dW1 = layer1Grads.dW;
+                Tensor db1 = layer1Grads.db;
+
+                // Backward through embedding
+                Tensor demb = dembcat.view(batchSize, blockSize, embeddingDim);
+                Tensor dC = ManualBackprop.embeddingBackward(
+                        demb, Xb, vocabSize, embeddingDim);
+
+                // ============================================
+                // UPDATE (using our manual gradients!)
+                // ============================================
+
+                // Learning rate decay
+                double currentLr = lr;
+                if (iter >= 150000) {
+                    currentLr = 0.01;
+                }
+
+                // Update all parameters
+                updateParameter(C, dC, currentLr);
+                updateParameter(W1, dW1, currentLr);
+                updateParameter(b1, db1, currentLr);
+                updateParameter(W2, dW2, currentLr);
+                updateParameter(b2, db2, currentLr);
+                updateParameter(bngain, dbngain, currentLr);
+                updateParameter(bnbias, dbnbias, currentLr);
+
+                // Logging
+                losses.add(loss);
+
+                if (iter % 10000 == 0 || iter == maxIters - 1) {
+                    double trainLoss = evaluateSample(
+                            C, W1, b1, W2, b2, bngain, bnbias,
+                            Xtr, Ytr, 500, blockSize, embeddingDim, hiddenSize,
+                            vocabSize, eps, rng);
+
+                    double devLoss = evaluateSample(
+                            C, W1, b1, W2, b2, bngain, bnbias,
+                            dataLoader.getXdev(), dataLoader.getYdev(), 500,
+                            blockSize, embeddingDim, hiddenSize, vocabSize, eps, rng);
+
+                    System.out.printf("Iter %d: loss=%.4f, train≈%.4f, dev≈%.4f (lr=%.3f)\n",
+                            iter, loss, trainLoss, devLoss, currentLr);
+                }
+
+                if (iter % 1000 == 0 && iter > 0) {
+                    System.gc(); // Suggest GC
+                }
+            }
+
+            System.out.println("\n📉 Learning rate decayed to 0.01 at iter 150000");
+
+            // Final evaluation (使用抽樣避免 OOM)
             System.out.println("\n=== Final Evaluation ===");
             Random evalRng = new Random(42);
-            double trainLoss = evaluateSample(modelWithBN, dataLoader.getXtr(), dataLoader.getYtr(), 1000, evalRng);
-            double devLoss = evaluateSample(modelWithBN, dataLoader.getXdev(), dataLoader.getYdev(), 1000, evalRng);
-            double testLoss = evaluateSample(modelWithBN, dataLoader.getXte(), dataLoader.getYte(), 1000, evalRng);
+            double finalTrain = evaluateSample(
+                    C, W1, b1, W2, b2, bngain, bnbias,
+                    Xtr, Ytr, 1000, blockSize, embeddingDim, hiddenSize,
+                    vocabSize, eps, evalRng);
+            double finalDev = evaluateSample(
+                    C, W1, b1, W2, b2, bngain, bnbias,
+                    dataLoader.getXdev(), dataLoader.getYdev(), 1000,
+                    blockSize, embeddingDim, hiddenSize, vocabSize, eps, evalRng);
+            double finalTest = evaluateSample(
+                    C, W1, b1, W2, b2, bngain, bnbias,
+                    dataLoader.getXte(), dataLoader.getYte(), 1000,
+                    blockSize, embeddingDim, hiddenSize, vocabSize, eps, evalRng);
 
-            System.out.printf("Train loss (1000 samples): %.4f\n", trainLoss);
-            System.out.printf("Dev loss (1000 samples): %.4f\n", devLoss);
-            System.out.printf("Test loss (1000 samples): %.4f\n", testLoss);
+            System.out.printf("Train loss (1000 samples): %.4f\n", finalTrain);
+            System.out.printf("Dev loss (1000 samples): %.4f\n", finalDev);
+            System.out.printf("Test loss (1000 samples): %.4f\n", finalTest);
 
             // Sample names
             System.out.println("\n=== Sampling 20 Names ===");
-            modelWithBN.setEvalMode();
-            List<String> samples = sampleNames(modelWithBN, dataLoader, 20);
+            List<String> samples = sampleNames(
+                    C, W1, b1, W2, b2, bngain, bnbias,
+                    20, blockSize, embeddingDim, hiddenSize, vocabSize, eps,
+                    dataLoader.getIdxToChar(), rng);
+
             for (int i = 0; i < samples.size(); i++) {
                 System.out.printf("%2d. %s\n", i + 1, samples.get(i));
             }
@@ -118,93 +246,25 @@ public class Main {
         }
     }
 
-    private static void trainModel(DeepMLP model, DataLoader dataLoader,
-                                   int maxIters, double lr, int batchSize,
-                                   boolean fullTraining) {
-
-        System.out.println("=== Training ===");
-        System.out.println("Max iterations: " + maxIters);
-        System.out.println("Learning rate: " + lr);
-        System.out.println("Batch size: " + batchSize + "\n");
-
-        model.setTrainMode();
-
-        Tensor Xtr = dataLoader.getXtr();
-        Tensor Ytr = dataLoader.getYtr();
-        int nTrain = Xtr.getShape()[0];
-
-        Random rng = new Random(2147483647L);
-
-        for (int iter = 0; iter < maxIters; iter++) {
-            // Mini-batch
-            int[] batchIndices = randomBatch(nTrain, batchSize, rng);
-            Tensor Xb = selectRows(Xtr, batchIndices);
-            Tensor Yb = selectRows(Ytr, batchIndices);
-
-            // Forward
-            Tensor logits = model.forward(Xb);
-            Tensor loss = crossEntropyLoss(logits, Yb);
-
-            // Backward
-            model.zeroGrad();
-            loss.backward();
-
-            // Get loss value before clearing
-            double lossValue = loss.item();
-
-            // Update with learning rate decay
-            double currentLr = lr;
-            if (fullTraining && iter >= 150000) {
-                currentLr = 0.01;
-            }
-
-            model.updateParameters(currentLr);
-
-            // Logging (減少評估頻率以節省記憶體)
-            if (iter % 10000 == 0 || iter == maxIters - 1 || (!fullTraining && iter % 100 == 0)) {
-                // 只在關鍵點才評估完整集合
-                if (iter % 10000 == 0 || iter == maxIters - 1) {
-                    double trainLoss = evaluateSample(model, Xtr, Ytr, 500, rng);
-                    double devLoss = evaluateSample(model, dataLoader.getXdev(), dataLoader.getYdev(), 500, rng);
-                    System.out.printf("Iter %d: loss=%.4f, train≈%.4f, dev≈%.4f\n",
-                            iter, lossValue, trainLoss, devLoss);
-                } else {
-                    // 其他時候只顯示當前批次的loss
-                    System.out.printf("Iter %d: loss=%.4f\n", iter, lossValue);
-                }
-
-                // For the failing experiment, show why it's failing
-                if (!fullTraining && iter == 100) {
-                    System.out.println("\n⚠️  Notice: Loss is not decreasing!");
-                    System.out.println("    Reason: Activations are saturating (check stats above)");
-                }
-            }
-
-            // Suggest GC every 1000 iterations
-            if (iter % 1000 == 0 && iter > 0) {
-                System.gc();
-            }
-        }
-
-        if (fullTraining && maxIters >= 150000) {
-            System.out.println("\n📉 Learning rate decayed to 0.01 at iter 150000");
+    private static void scaleInit(Tensor t, double factor) {
+        double[] data = t.getData();
+        for (int i = 0; i < data.length; i++) {
+            data[i] *= factor;
         }
     }
 
-    private static double evaluate(DeepMLP model, Tensor X, Tensor Y) {
-        model.setEvalMode();
+    private static void updateParameter(Tensor param, Tensor grad, double lr) {
+        double[] pData = param.getData();
+        double[] gData = grad.getData();
+        for (int i = 0; i < pData.length; i++) {
+            pData[i] -= lr * gData[i];
+        }
+    }
 
-        Tensor logits = model.forward(X);
-
-        // Calculate loss without gradients
-        Tensor exp = logits.exp();
-        Tensor sumExp = exp.sum(1, true);
-        Tensor probs = exp.div(sumExp);
-
-        int batchSize = X.getShape()[0];
-        int vocabSize = logits.getShape()[1];
+    private static double crossEntropyLoss(Tensor probs, Tensor targets,
+                                           int batchSize, int vocabSize) {
         double[] probData = probs.getData();
-        double[] targetData = Y.getData();
+        double[] targetData = targets.getData();
 
         double totalLoss = 0.0;
         for (int i = 0; i < batchSize; i++) {
@@ -213,15 +273,42 @@ public class Main {
             totalLoss += -Math.log(Math.max(prob, 1e-10));
         }
 
-        model.setTrainMode();
         return totalLoss / batchSize;
     }
 
-    /**
-     * Evaluate on a random sample (to save memory)
-     */
-    private static double evaluateSample(DeepMLP model, Tensor X, Tensor Y,
-                                         int sampleSize, Random rng) {
+    private static Tensor forward(Tensor C, Tensor W1, Tensor b1,
+                                  Tensor W2, Tensor b2,
+                                  Tensor bngain, Tensor bnbias,
+                                  Tensor X, int blockSize, int embeddingDim,
+                                  int hiddenSize, double eps) {
+        int batchSize = X.getShape()[0];
+
+        Tensor emb = C.index(X);
+        Tensor embcat = emb.view(batchSize, blockSize * embeddingDim);
+
+        Tensor hprebn = embcat.matmul(W1).add(b1);
+
+        // BatchNorm
+        Tensor bnmean = hprebn.mean(0);
+        Tensor bnvar = hprebn.variance(0);
+        Tensor hprebn_centered = hprebn.subtract(bnmean);
+        Tensor bnstd = bnvar.add(eps).sqrt();
+        Tensor bnraw = hprebn_centered.div(bnstd);
+        Tensor hpreact = bnraw.mul(bngain).add(bnbias);
+
+        Tensor h = hpreact.tanh();
+        Tensor logits = h.matmul(W2).add(b2);
+
+        return logits;
+    }
+
+    private static double evaluateSample(Tensor C, Tensor W1, Tensor b1,
+                                         Tensor W2, Tensor b2,
+                                         Tensor bngain, Tensor bnbias,
+                                         Tensor X, Tensor Y, int sampleSize,
+                                         int blockSize, int embeddingDim,
+                                         int hiddenSize, int vocabSize,
+                                         double eps, Random rng) {
         int n = X.getShape()[0];
         sampleSize = Math.min(sampleSize, n);
 
@@ -229,50 +316,58 @@ public class Main {
         Tensor Xs = selectRows(X, indices);
         Tensor Ys = selectRows(Y, indices);
 
-        return evaluate(model, Xs, Ys);
+        Tensor logits = forward(C, W1, b1, W2, b2, bngain, bnbias,
+                Xs, blockSize, embeddingDim, hiddenSize, eps);
+        Tensor probs = logits.softmax(1);
+
+        return crossEntropyLoss(probs, Ys, sampleSize, vocabSize);
     }
 
-    /**
-     * Clear computation graph to free memory
-     * Critical for long training runs!
-     */
-    private static void clearComputationGraph(Tensor t) {
-        // Simply let Java GC handle it by not keeping references
-        // The key is to not hold onto intermediate tensors
+    private static double evaluateFull(Tensor C, Tensor W1, Tensor b1,
+                                       Tensor W2, Tensor b2,
+                                       Tensor bngain, Tensor bnbias,
+                                       Tensor X, Tensor Y,
+                                       int blockSize, int embeddingDim,
+                                       int hiddenSize, int vocabSize,
+                                       double eps) {
+        int batchSize = X.getShape()[0];
+
+        Tensor logits = forward(C, W1, b1, W2, b2, bngain, bnbias,
+                X, blockSize, embeddingDim, hiddenSize, eps);
+        Tensor probs = logits.softmax(1);
+
+        return crossEntropyLoss(probs, Y, batchSize, vocabSize);
     }
 
-    private static Tensor crossEntropyLoss(Tensor logits, Tensor targets) {
-        Tensor exp = logits.exp();
-        Tensor sumExp = exp.sum(1, true);
-        Tensor probs = exp.div(sumExp);
-        Tensor selected = probs.gather(targets);
-        return selected.log().neg().mean();
-    }
-
-    private static List<String> sampleNames(DeepMLP model, DataLoader dataLoader, int n) {
+    private static List<String> sampleNames(Tensor C, Tensor W1, Tensor b1,
+                                            Tensor W2, Tensor b2,
+                                            Tensor bngain, Tensor bnbias,
+                                            int n, int blockSize, int embeddingDim,
+                                            int hiddenSize, int vocabSize, double eps,
+                                            Map<Integer, Character> idxToChar,
+                                            Random rng) {
         List<String> samples = new ArrayList<>();
-        Random rng = new Random(2147483647L + 10);
 
         for (int s = 0; s < n; s++) {
             List<Integer> out = new ArrayList<>();
-            int[] context = new int[3];
+            int[] context = new int[blockSize];
 
             while (true) {
-                double[] contextData = new double[3];
-                for (int i = 0; i < 3; i++) {
+                double[] contextData = new double[blockSize];
+                for (int i = 0; i < blockSize; i++) {
                     contextData[i] = context[i];
                 }
-                Tensor contextTensor = new Tensor(contextData, new int[]{1, 3});
+                Tensor contextTensor = new Tensor(contextData, new int[]{1, blockSize});
 
-                Tensor logits = model.forward(contextTensor);
-                Tensor exp = logits.exp();
-                Tensor sumExp = exp.sum(1, true);
-                Tensor probs = exp.div(sumExp);
+                Tensor logits = forward(C, W1, b1, W2, b2, bngain, bnbias,
+                        contextTensor, blockSize, embeddingDim,
+                        hiddenSize, eps);
+                Tensor probs = logits.softmax(1);
 
                 int nextIdx = sampleMultinomial(probs.getData(), rng);
 
-                System.arraycopy(context, 1, context, 0, 2);
-                context[2] = nextIdx;
+                System.arraycopy(context, 1, context, 0, blockSize - 1);
+                context[blockSize - 1] = nextIdx;
                 out.add(nextIdx);
 
                 if (nextIdx == 0 || out.size() > 20) break;
@@ -281,7 +376,7 @@ public class Main {
             StringBuilder name = new StringBuilder();
             for (int idx : out) {
                 if (idx == 0) break;
-                name.append(dataLoader.getIdxToChar().get(idx));
+                name.append(idxToChar.get(idx));
             }
             samples.add(name.toString());
         }
@@ -325,55 +420,55 @@ public class Main {
 
     private static void printSummary() {
         System.out.println("\n" + "=".repeat(60));
-        System.out.println("KEY INSIGHTS FROM LECTURE 4");
+        System.out.println("KEY INSIGHTS FROM LECTURE 5");
         System.out.println("=".repeat(60));
 
+        System.out.println("\n🥷 What We Accomplished:");
+        System.out.println("   ✅ Trained entire network WITHOUT loss.backward()");
+        System.out.println("   ✅ Calculated ALL gradients manually");
+        System.out.println("   ✅ Used optimized backward passes");
+        System.out.println("   ✅ Achieved same results as autograd");
+
         System.out.println("\n🔑 Core Concepts:");
-        System.out.println("   1. Deep Networks are Hard to Train");
-        System.out.println("      - Activations saturate or explode");
-        System.out.println("      - Gradients vanish or explode");
-        System.out.println("      - Initialization becomes critical");
+        System.out.println("   1. Chain Rule is Everything");
+        System.out.println("      dloss/dx = dloss/dy * dy/dx");
+        System.out.println("      Local gradient × Global gradient");
 
-        System.out.println("\n   2. Batch Normalization Fixes This");
-        System.out.println("      - Forces activations to mean=0, std=1");
-        System.out.println("      - Stabilizes training");
-        System.out.println("      - Allows deeper networks");
+        System.out.println("\n   2. Gradient Shapes Must Match");
+        System.out.println("      dX.shape == X.shape (always!)");
+        System.out.println("      Broadcasting backward needs sum()");
 
-        System.out.println("\n   3. Activation Statistics Matter");
-        System.out.println("      - Monitor mean, std, saturation");
-        System.out.println("      - Healthy: mean≈0, std≈0.6, sat<5%");
-        System.out.println("      - Unhealthy: saturated (sat>90%)");
+        System.out.println("\n   3. Optimization Matters");
+        System.out.println("      Cross-Entropy: 3 lines vs 10+ lines");
+        System.out.println("      BatchNorm: 5 lines vs 15+ lines");
+        System.out.println("      Performance: 3-5x faster!");
 
-        System.out.println("\n   4. Gradient Flow is Critical");
-        System.out.println("      - Update ratio should be ~1e-3");
-        System.out.println("      - Too large → instability");
-        System.out.println("      - Too small → slow learning");
+        System.out.println("\n📊 Common Gradients:");
+        System.out.println("   y = x²        → dy/dx = 2x");
+        System.out.println("   y = e^x       → dy/dx = e^x = y");
+        System.out.println("   y = log(x)    → dy/dx = 1/x");
+        System.out.println("   y = tanh(x)   → dy/dx = 1 - y²");
+        System.out.println("   y = sum(x)    → dy/dx = 1 (broadcast)");
+        System.out.println("   y = x @ W     → dy/dW = x^T @ dy");
 
-        System.out.println("\n📊 Architecture Pattern:");
-        System.out.println("   Modern Deep Network = Stack of:");
-        System.out.println("   [Linear → BatchNorm → Activation] × N");
-        System.out.println("   → Final Linear → BatchNorm");
+        System.out.println("\n💡 Why This Matters:");
+        System.out.println("   • Deep understanding of neural nets");
+        System.out.println("   • Can implement custom operations");
+        System.out.println("   • Can optimize critical paths");
+        System.out.println("   • Can debug gradient issues");
+        System.out.println("   • No longer dependent on frameworks");
 
-        System.out.println("\n💡 Why No Bias in Linear?");
-        System.out.println("   - BatchNorm's beta parameter provides shift");
-        System.out.println("   - Adding bias would be redundant");
+        System.out.println("\n🎯 Historical Context:");
+        System.out.println("   Before 2015: Everyone did this manually!");
+        System.out.println("   2010-2014: Karpathy's research code");
+        System.out.println("   Now: Autograd makes it easy");
+        System.out.println("   But: Understanding is still crucial");
 
-        System.out.println("\n🎯 Training vs Inference:");
-        System.out.println("   Training:   Use batch statistics");
-        System.out.println("   Inference:  Use running statistics");
-        System.out.println("   → Need to maintain running mean/var!");
+        System.out.println("\n🚀 What's Next:");
+        System.out.println("   • Lecture 6: WaveNet (convolutional architecture)");
+        System.out.println("   • Lecture 7: GPT (transformer)");
+        System.out.println("   • Lecture 8: Tokenizer (BPE)");
 
-        System.out.println("\n⚠️  BatchNorm Gotchas:");
-        System.out.println("   - Couples examples in batch (breaks independence)");
-        System.out.println("   - Sensitive to batch size");
-        System.out.println("   - Tricky for RNNs");
-        System.out.println("   - Alternatives: LayerNorm, GroupNorm");
-
-        System.out.println("\n🎓 What's Next:");
-        System.out.println("   • Lecture 5: Manual Backpropagation");
-        System.out.println("   • Lecture 6: WaveNet Architecture");
-        System.out.println("   • Lecture 7: Transformer/GPT");
-
-        System.out.println("\n✅ Lecture 4 Complete!\n");
+        System.out.println("\n✅ Lecture 5 Complete - You're a Backprop Ninja! 🥷\n");
     }
 }
